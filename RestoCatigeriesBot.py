@@ -1,9 +1,10 @@
 import logging
 import requests
+import aiohttp
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
-GET_CATEGORIES, EXIT_CATEGORIES = range(2)
+GET_CATEGORIES = range(1)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -17,64 +18,45 @@ async def start(update: Update, context) -> int:
     return GET_CATEGORIES
 
 async def get_categories(update: Update, context) -> int:
+    phone = update.message.text  # Сохраняем номер телефона как строку
     msg = await update.message.reply_text("⌛ Запрос в базу данных ⌛")
-    context.user_data['phone'] = update.message.text  # Сохраняем номер телефона как строку
-    context.user_data['messages'].append(update.message.message_id)
-    context.user_data['messages'].append(msg.message_id)
-    return EXIT_CATEGORIES
-
-async def exit_categories(update: Update, context) -> int:
-    logging.info("Переход в состояние EXIT_CATEGORIES")
-    print("asdasdasdasdsad")
-    phone = context.user_data['phone']
-    try:
-        categories = await iikoTransport(phone)  # Используем асинхронную функцию
-        print(categories)
-    except KeyError :  
-        print("kall")
-    msg = await update.message.reply_text(f"Ваши категории: {categories}")
-    context.user_data['messages'].extend([msg.message_id, update.message.message_id])
-
-    # Удаляем все сообщения
-    for message_id in context.user_data['messages']:
-        try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=message_id)
-        except Exception as e:
-            print(f"Не удалось удалить сообщение {message_id}: {e}")
-
-    context.user_data.clear()
-    return ConversationHandler.RESTART  # Перезапуск диалога
-
-async def iikoTransport(phone: str) -> list:
-    payloadAuth = {
-        "apiLogin": "da51d02fdc8248b9a57f37f0edbdee40"
-    }
-    responseAuth = requests.post('https://api-ru.iiko.services/api/1/access_token', json=payloadAuth)
-    
-    if responseAuth.status_code == 200:
-        dataAuth = responseAuth.json()
-        token = dataAuth.get("token")
-    else:
-        print("Ошибка авторизации:", responseAuth.status_code)
-        return ["Ошибка авторизации"]
-    payloadClientInfo = {
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(use_dns_cache=True)) as session:
+        payloadAuth = { "apiLogin": "da51d02fdc8248b9a57f37f0edbdee40" }
+        async with session.post('https://api-ru.iiko.services/api/1/access_token', json = payloadAuth) as responseAuth:
+            if responseAuth.status == 200:
+                dataAuth = await responseAuth.json()
+                token = dataAuth.get("token")
+                if not token:
+                    await msg.edit_text("Не удалось получить токен.")
+                    return ConversationHandler.END
+            else:
+                await msg.edit_text("Ошибка при получении токена.")
+                return ConversationHandler.END
+        headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",}
+        payloadClientInfo = {
         "phone": phone,
         "type": "phone",
-        "organizationId": "5f172cf0-d387-4ec2-b3b6-578a8126b083"
-    }
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    responseClientInfo = requests.post('https://api-ru.iiko.services/api/1/loyalty/iiko/customer/info', json=payloadClientInfo, headers=headers)
-    
-    if responseClientInfo.status_code == 200:
-        dataClientInfo = responseClientInfo.json()
-        return dataClientInfo.get("categories", ["Категории не найдены"])
-    else:
-        print("Ошибка получения данных клиента:", responseClientInfo.json())
-        return ["Ошибка получения данных"]
-
+        "organizationId": "5f172cf0-d387-4ec2-b3b6-578a8126b083"} 
+        async with session.post('https://api-ru.iiko.services/api/1/loyalty/iiko/customer/info', json=payloadClientInfo ,headers=headers) as responseClientInfo:
+            if responseClientInfo.status == 200:
+                dataClientInfo = await responseClientInfo.json()
+                categories = dataClientInfo.get("categories")
+                if not categories:
+                    await msg.edit_text("Не удалось получить токен.")
+                    return ConversationHandler.END
+            else:
+                await msg.edit_text("Ошибка при получении токена.")
+                return ConversationHandler.END
+        categoriesList= [category['name'] for category in categories]
+        categoriesText = "\n".join(categoriesList)
+    await  msg.edit_text(
+        f"Ваш телефон: {phone}"
+        f"Ваши категории: {categoriesText}")
+    context.user_data['messages'].append(update.message.message_id)
+    context.user_data['messages'].append(msg.message_id)
+    return ConversationHandler.END
 # Команда отмены
 async def cancel(update: Update, context) -> int:
     context.user_data['messages'].append(update.message.message_id)
@@ -98,8 +80,8 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            GET_CATEGORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_categories)],
-            EXIT_CATEGORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, exit_categories)]
+            GET_CATEGORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_categories)]
+            # EXIT_CATEGORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, exit_categories)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
